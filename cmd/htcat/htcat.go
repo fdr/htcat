@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 )
 
@@ -95,6 +96,14 @@ func main() {
 	if partSize > 20*MB {
 		partSize = 20 * MB
 	}
+
+	// Profile
+	f, err := os.Create("htcat-cpuprof")
+	if err != nil {
+		log.Fatal(err)
+	}
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
 
 	// Begin the GET.
 	htc := htcat.New(client, u, parallelism, partSize, length)
