@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -30,11 +31,29 @@ type HtCat struct {
 	// Protect httpFragGen with a Mutex.
 	httpFragGenMu sync.Mutex
 	httpFragGen
+
+	// ETag for re-checking that the same object is being
+	// addressed by multiple requests, if available.
+	etag string
 }
 
 type HttpStatusError struct {
 	error
 	Status string
+}
+
+type ETagMismatch struct {
+	error
+	FirstETag    string
+	ReceivedEtag string
+}
+
+// Vets the usefulness of an ETag.
+//
+// An empty etag is not useful, and neither is a "weak" ETag, prefixed
+// with "W/".
+func etagIsUseful(etag string) bool {
+	return !(etag == "" || strings.HasPrefix(etag, "W/"))
 }
 
 func (cat *HtCat) startup(parallelism int) {
@@ -66,6 +85,13 @@ func (cat *HtCat) startup(parallelism int) {
 	}
 
 	l := resp.Header.Get("Content-Length")
+
+	// Store the ETag it can be used for fidelity checking of
+	// future requests.
+	etag := resp.Header.Get("ETag")
+	if etagIsUseful(etag) {
+		cat.etag = etag
+	}
 
 	// Some kinds of small or indeterminate-length files will
 	// receive no parallelism.  This procedure helps prepare the
@@ -219,6 +245,27 @@ func (cat *HtCat) get() {
 				Status: resp.Status}
 			go cat.defrag.cancel(err)
 			return
+		}
+
+		// Check for potential ETag mismatch and abort with an
+		// error if it occurs.
+		if cat.etag != "" {
+			receivedETag := resp.Header.Get("ETag")
+			if etagIsUseful(receivedETag) &&
+				cat.etag != receivedETag {
+				msg := fmt.Errorf("Expected ETag Status %s, "+
+					"received: %q",
+					cat.etag, receivedETag)
+
+				err = ETagMismatch{
+					error:        msg,
+					FirstETag:    cat.etag,
+					ReceivedEtag: receivedETag,
+				}
+
+				go cat.defrag.cancel(err)
+				return
+			}
 		}
 
 		er := newEagerReader(resp.Body, hf.size)
